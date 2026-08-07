@@ -43,6 +43,10 @@ jobs:
           path: .scoop-core
           persist-credentials: false
 
+      - name: Validate trusted automation contract
+        shell: pwsh
+        run: ./scripts/Test-AutomationContract.ps1
+
       - name: Select publishable manifest or immutable fixture
         id: manifest
         shell: pwsh
