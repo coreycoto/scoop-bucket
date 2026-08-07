@@ -37,7 +37,10 @@ entry in `release-manifest.json`. Validation also requires:
 - the public tag, release manifest, and installed `build-info` sharing one full
   source revision with `source_dirty: false`;
 - successful native installation and removal on `windows-2025` and
-  `windows-11-arm`; and
+  `windows-11-arm`;
+- an explicitly dispatched cross-version upgrade-in-place proof on both
+  Windows architectures for every release after the first published manifest;
+  and
 - deliberate hash corruption failing before a shim is installed.
 
 The normal release path is an automatic trusted-main receiver. After the stable
@@ -73,6 +76,12 @@ immutable values from the public release; it never accepts an archive or hash
 that it cannot rederive. CI repeats release identity, schema, clean-install,
 uninstall, and bad-hash validation on both supported architectures. The Scoop
 core used in CI is pinned to an immutable revision.
+
+After publishing a new manifest, dispatch `CI` on exact current `main` with
+`previous_manifest_ref` set to the full ancestor commit that contains the
+previous public manifest. That bounded lane installs the previous version,
+runs `scoop update` and `scoop update git-slop` without uninstalling, and proves
+the pre-update and post-update versions and source revisions on x64 and ARM64.
 
 Repository layout:
 
