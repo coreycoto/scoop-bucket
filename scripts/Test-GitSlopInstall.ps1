@@ -132,10 +132,18 @@ $badHashArguments = @(
     'install', '--independent', '--no-cache', '--no-update-scoop', '--arch',
     $Architecture, $badManifestPath
 )
-& pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scoopScript @badHashArguments
+$badHashOutput = @(
+    & pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scoopScript @badHashArguments 2>&1
+)
 $badHashExitCode = $LASTEXITCODE
-if ($badHashExitCode -eq 0) {
-    throw 'A deliberately corrupted archive hash unexpectedly installed successfully.'
+$badHashOutput | ForEach-Object { Write-Output $_ }
+$badHashText = ($badHashOutput | Out-String).Trim()
+if ($badHashText -cnotmatch 'ERROR Hash check failed!') {
+    throw 'Scoop did not report the expected corrupted archive hash rejection.'
+}
+$badInstallInfoPath = Join-Path $env:SCOOP "apps\git-slop-bad-hash\$version\install.json"
+if (Test-Path -LiteralPath $badInstallInfoPath) {
+    throw 'The bad-hash installation wrote installed-app metadata.'
 }
 foreach ($shimName in $shimNames) {
     if (Test-Path -LiteralPath (Join-Path $shimDirectory $shimName)) {
@@ -148,5 +156,6 @@ foreach ($shimName in $shimNames) {
     revision = $buildInfo.source_revision
     architecture = $Architecture
     target = $ExpectedTarget
+    bad_hash_rejected = $true
     bad_hash_exit_code = $badHashExitCode
 } | ConvertTo-Json -Compress
