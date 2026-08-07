@@ -47,6 +47,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: main
 
       - name: Verify dispatch ran from exact bucket main
@@ -174,9 +175,12 @@ jobs:
         id: branch
         env:
           CANDIDATE: ${{ steps.release.outputs.candidate }}
+          GH_TOKEN: ${{ secrets.SCOOP_BUCKET_AUTOMATION_TOKEN }}
           RELEASE_REVISION: ${{ steps.release.outputs.revision }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          test -n "${GH_TOKEN:-}"
+          gh auth setup-git
           branch="automation/git-slop-v${RELEASE_VERSION}"
           origin_main="$(git rev-parse origin/main)"
           live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
@@ -277,7 +281,7 @@ jobs:
         if: steps.branch.outputs.changed == 'true'
         env:
           BRANCH: ${{ steps.branch.outputs.branch }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SCOOP_BUCKET_AUTOMATION_TOKEN }}
           HEAD_SHA: ${{ steps.branch.outputs.head-sha }}
           MANIFEST_SHA256: ${{ steps.release.outputs.manifest-sha256 }}
           RELEASE_ID: ${{ inputs.release_id }}
@@ -333,10 +337,20 @@ jobs:
           jq -e \
             --arg branch "$BRANCH" \
             --arg base_sha "$base_sha" \
-            --arg head_sha "$HEAD_SHA" '
+            --arg head_sha "$HEAD_SHA" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" '
               .state == "open" and
               .draft == false and
-              .user.login == "github-actions[bot]" and
+              (
+                (
+                  .user.login == $owner and
+                  .user.type == "User"
+                ) or
+                (
+                  .user.login == "github-actions[bot]" and
+                  .user.type == "Bot"
+                )
+              ) and
               .base.ref == "main" and
               .base.sha == $base_sha and
               .head.ref == $branch and
@@ -345,60 +359,63 @@ jobs:
           echo "number=$pr_number" >> "$GITHUB_OUTPUT"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq .html_url
 
-      - name: Dispatch and await exact-head Windows qualification
+      - name: Await exact-PR Windows qualification
         id: qualification
         if: steps.branch.outputs.changed == 'true'
         env:
           BRANCH: ${{ steps.branch.outputs.branch }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.branch.outputs.head-sha }}
+          PULL_REQUEST: ${{ steps.pull-request.outputs.number }}
         run: |
           workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml" --jq .id)"
-          runs_path="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?branch=${BRANCH}&event=workflow_dispatch&per_page=100"
-          gh api "$runs_path" > "$RUNNER_TEMP/qualification-runs.json"
-          run_id="$(
-            jq -r \
-              --arg head "$HEAD_SHA" '
-                [.workflow_runs[] |
-                  select(
-                    .head_sha == $head and
-                    (.status != "completed" or .conclusion == "success")
-                  )
-                ] | sort_by(.id) | last | .id // empty
-              ' "$RUNNER_TEMP/qualification-runs.json"
-          )"
-          if test -z "$run_id"; then
-            max_before="$(jq -r '[.workflow_runs[].id] | max // 0' "$RUNNER_TEMP/qualification-runs.json")"
-            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
-            for attempt in $(seq 1 30); do
-              gh api "$runs_path" > "$RUNNER_TEMP/qualification-runs.json"
-              run_id="$(
-                jq -r \
-                  --arg head "$HEAD_SHA" \
-                  --argjson max_before "$max_before" '
-                    [.workflow_runs[] |
-                      select(.id > $max_before and .head_sha == $head)
-                    ] | sort_by(.id) | first | .id // empty
-                  ' "$RUNNER_TEMP/qualification-runs.json"
-              )"
-              test -n "$run_id" && break
-              test "$attempt" != 30
-              sleep 2
-            done
-          fi
+          runs_path="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?branch=${BRANCH}&event=pull_request&per_page=100"
+          run_id=""
+          for attempt in $(seq 1 60); do
+            gh api "$runs_path" > "$RUNNER_TEMP/qualification-runs.json"
+            run_id="$(
+              jq -r \
+                --arg head "$HEAD_SHA" \
+                --argjson pull_request "$PULL_REQUEST" '
+                  [.workflow_runs[] |
+                    select(
+                      .head_sha == $head and
+                      any(.pull_requests[]?; .number == $pull_request)
+                    )
+                  ] | sort_by(.id) | last | .id // empty
+                ' "$RUNNER_TEMP/qualification-runs.json"
+            )"
+            test -n "$run_id" && break
+            test "$attempt" != 60
+            sleep 2
+          done
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "$RUNNER_TEMP/qualification-run.json"
+          if test "$(jq -r '.conclusion // ""' "$RUNNER_TEMP/qualification-run.json")" = "action_required"; then
+            echo "The automation credential did not start canonical pull-request CI without approval." >&2
+            exit 1
+          fi
           gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "$RUNNER_TEMP/qualification-run.json"
           jq -e \
             --arg branch "$BRANCH" \
             --arg head "$HEAD_SHA" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson pull_request "$PULL_REQUEST" \
             --argjson workflow_id "$workflow_id" \
             --argjson run_id "$run_id" '
               .id == $run_id and
               .workflow_id == $workflow_id and
-              .event == "workflow_dispatch" and
+              .path == ".github/workflows/ci.yml" and
+              .event == "pull_request" and
               .head_branch == $branch and
               .head_sha == $head and
+              .repository.full_name == $repository and
+              .head_repository.full_name == $repository and
+              .actor.login == $owner and
+              .triggering_actor.login == $owner and
+              ([.pull_requests[] | select(.number == $pull_request)] | length) == 1 and
               .status == "completed" and
               .conclusion == "success"
             ' "$RUNNER_TEMP/qualification-run.json" >/dev/null
@@ -433,10 +450,20 @@ jobs:
           jq -e \
             --arg branch "$BRANCH" \
             --arg base_sha "$base_sha" \
-            --arg head_sha "$HEAD_SHA" '
+            --arg head_sha "$HEAD_SHA" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" '
               .state == "open" and
               .draft == false and
-              .user.login == "github-actions[bot]" and
+              (
+                (
+                  .user.login == $owner and
+                  .user.type == "User"
+                ) or
+                (
+                  .user.login == "github-actions[bot]" and
+                  .user.type == "Bot"
+                )
+              ) and
               .base.ref == "main" and
               .base.sha == $base_sha and
               .head.ref == $branch and
@@ -457,11 +484,20 @@ jobs:
           jq -e \
             --arg branch "$BRANCH" \
             --arg head "$HEAD_SHA" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson pull_request "$PULL_REQUEST" \
             --argjson run_id "$QUALIFICATION_RUN_ID" '
               .id == $run_id and
-              .event == "workflow_dispatch" and
+              .path == ".github/workflows/ci.yml" and
+              .event == "pull_request" and
               .head_branch == $branch and
               .head_sha == $head and
+              .repository.full_name == $repository and
+              .head_repository.full_name == $repository and
+              .actor.login == $owner and
+              .triggering_actor.login == $owner and
+              ([.pull_requests[] | select(.number == $pull_request)] | length) == 1 and
               .status == "completed" and
               .conclusion == "success"
             ' "$RUNNER_TEMP/final-qualification-run.json" >/dev/null

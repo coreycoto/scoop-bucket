@@ -34,6 +34,19 @@ function Reject-Text {
     }
 }
 
+function Require-Count {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Text,
+        [Parameter(Mandatory = $true)] [string] $Expected,
+        [Parameter(Mandatory = $true)] [int] $Count,
+        [Parameter(Mandatory = $true)] [string] $Label
+    )
+    $actual = ([regex]::Matches($Text, [regex]::Escape($Expected))).Count
+    if ($actual -ne $Count) {
+        throw "$Label requires $Count occurrences of '$Expected'; found $actual."
+    }
+}
+
 foreach ($required in @(
     'workflow_dispatch:',
     'release_manifest_sha256:',
@@ -44,6 +57,7 @@ foreach ($required in @(
     'actions: write',
     'contents: write',
     'pull-requests: write',
+    'persist-credentials: false',
     'Verify dispatch ran from exact bucket main',
     'test "$GITHUB_SHA" = "$live_main"',
     '(.assets | length) == 8',
@@ -53,10 +67,16 @@ foreach ($required in @(
     './scripts/New-GitSlopManifest.ps1',
     './scripts/Test-GitSlopManifest.ps1',
     'branch="automation/git-slop-v${RELEASE_VERSION}"',
+    'gh auth setup-git',
     'test "$(git diff --cached --name-only --no-renames)" = "bucket/git-slop.json"',
     '--force-with-lease="refs/heads/${branch}:${remote_sha}"',
     '.user.login == "github-actions[bot]"',
-    'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"',
+    '.user.login == $owner',
+    'Await exact-PR Windows qualification',
+    'event=pull_request',
+    '.event == "pull_request"',
+    '.actor.login == $owner',
+    '.triggering_actor.login == $owner',
     '([.jobs[].name] | sort) == ["Windows 64bit", "Windows arm64"]',
     'Reverify exact PR head and governed-merge',
     'length == 1 and',
@@ -75,7 +95,9 @@ foreach ($forbidden in @(
     'schedule:',
     'pull_request_target:',
     'repository_dispatch:',
-    'secrets.',
+    'secrets.GITHUB_TOKEN',
+    'secrets.SCOOP_BUCKET_DISPATCH_TOKEN',
+    'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"',
     'HEAD:refs/heads/main',
     'gh release create',
     'gh release upload',
@@ -83,6 +105,8 @@ foreach ($forbidden in @(
 )) {
     Reject-Text -Text $receiver -Rejected $forbidden -Label 'update-git-slop.yml'
 }
+
+Require-Count -Text $receiver -Expected 'GH_TOKEN: ${{ secrets.SCOOP_BUCKET_AUTOMATION_TOKEN }}' -Count 2 -Label 'update-git-slop.yml'
 
 foreach ($required in @(
     'pull_request:',
@@ -98,6 +122,13 @@ foreach ($required in @(
     './scripts/Test-GitSlopInstall.ps1'
 )) {
     Require-Text -Text $ci -Expected $required -Label 'ci.yml'
+}
+
+foreach ($forbidden in @(
+    'secrets.',
+    'pull_request_target:'
+)) {
+    Reject-Text -Text $ci -Rejected $forbidden -Label 'ci.yml'
 }
 
 foreach ($required in @(
