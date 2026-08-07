@@ -1,0 +1,38 @@
+{
+  "version": "0.9.4",
+  "description": "Deterministic repository health and maintenance-pressure analysis for humans and AI agents.",
+  "homepage": "https://github.com/coreycoto/git-slop",
+  "license": "MIT",
+  "suggest": {
+    "Git": "git"
+  },
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/coreycoto/git-slop/releases/download/v0.9.4/git-slop-v0.9.4-x86_64-pc-windows-msvc.zip",
+      "hash": "992d8b69f8b9da8996908a990f0609017109ca58170d5c640aaab3234f91fefa",
+      "extract_dir": "git-slop-v0.9.4-x86_64-pc-windows-msvc"
+    },
+    "arm64": {
+      "url": "https://github.com/coreycoto/git-slop/releases/download/v0.9.4/git-slop-v0.9.4-aarch64-pc-windows-msvc.zip",
+      "hash": "ec56c182f87f47c34d25b0ea2b94930466f48ab74e7a4781f46b4c7f4538d294",
+      "extract_dir": "git-slop-v0.9.4-aarch64-pc-windows-msvc"
+    }
+  },
+  "bin": "git-slop.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/coreycoto/git-slop/releases/download/v$version/git-slop-v$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "git-slop-v$version-x86_64-pc-windows-msvc"
+      },
+      "arm64": {
+        "url": "https://github.com/coreycoto/git-slop/releases/download/v$version/git-slop-v$version-aarch64-pc-windows-msvc.zip",
+        "extract_dir": "git-slop-v$version-aarch64-pc-windows-msvc"
+      }
+    },
+    "hash": {
+      "url": "https://github.com/coreycoto/git-slop/releases/download/v$version/SHA256SUMS"
+    }
+  }
+}
