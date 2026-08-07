@@ -6,6 +6,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      previous_manifest_ref:
+        description: Exact ancestor commit containing the previous public git-slop manifest
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +38,7 @@ jobs:
       - name: Checkout bucket
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout pinned Scoop core
@@ -80,6 +86,51 @@ jobs:
             -ScoopHome '.scoop-core' `
             -ReleaseManifestPath (Join-Path $env:RUNNER_TEMP 'git-slop-release-evidence/release-manifest.json')
 
+      - name: Resolve exact previous public manifest
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.previous_manifest_ref != '' }}
+        id: previous_manifest
+        shell: pwsh
+        env:
+          PREVIOUS_MANIFEST_REF: ${{ inputs.previous_manifest_ref }}
+        run: |
+          if ($env:PREVIOUS_MANIFEST_REF -cnotmatch '^[a-f0-9]{40}$') {
+            throw 'previous_manifest_ref must be one full lowercase commit SHA.'
+          }
+          & git merge-base --is-ancestor $env:PREVIOUS_MANIFEST_REF HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw 'previous_manifest_ref must be an ancestor of the dispatched revision.'
+          }
+          $previousManifest = @(
+            & git show "${env:PREVIOUS_MANIFEST_REF}:bucket/git-slop.json"
+          )
+          if ($LASTEXITCODE -ne 0 -or $previousManifest.Count -eq 0) {
+            throw 'The exact previous commit does not contain bucket/git-slop.json.'
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'git-slop-previous-manifest.json'
+          [System.IO.File]::WriteAllLines(
+            $path,
+            $previousManifest,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+          $current = Get-Content -LiteralPath '${{ steps.manifest.outputs.path }}' -Raw | ConvertFrom-Json
+          if ([version] $previous.version -ge [version] $current.version) {
+            throw "Previous version $($previous.version) must precede current version $($current.version)."
+          }
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Prove cross-version upgrade in place
+        if: ${{ steps.previous_manifest.outputs.path != '' }}
+        shell: pwsh
+        run: |
+          ./scripts/Test-GitSlopUpgrade.ps1 `
+            -PreviousManifestPath '${{ steps.previous_manifest.outputs.path }}' `
+            -CurrentManifestPath '${{ steps.manifest.outputs.path }}' `
+            -Architecture '${{ matrix.architecture }}' `
+            -ExpectedTarget '${{ matrix.target }}' `
+            -ScoopHome '.scoop-core' `
+            -CurrentReleaseManifestPath (Join-Path $env:RUNNER_TEMP 'git-slop-release-evidence/release-manifest.json')
+
       - name: Summarize qualification
         if: always()
         shell: pwsh
@@ -91,4 +142,5 @@ jobs:
           - Architecture: ${{ matrix.architecture }}
           - Target: ${{ matrix.target }}
           - Scoop core: b588a06e41d920d2123ec70aee682bae14935939
+          - Previous manifest ref: ${{ inputs.previous_manifest_ref || 'not requested' }}
           "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
