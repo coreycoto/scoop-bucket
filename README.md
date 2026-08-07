@@ -43,15 +43,18 @@ entry in `release-manifest.json`. Validation also requires:
 The normal release path is an automatic trusted-main receiver. After the stable
 Git Slop GitHub Release becomes public, its read-only publication verifier
 dispatches only the exact version, release ID, source revision, and release
-manifest digest. This bucket carries no named cross-repository secret: its own
-workflow token is used only after trusted `main` independently reverifies the
-public eight-asset/seven-checksum release.
+manifest digest. This bucket carries no cross-repository secret. A separate
+bucket-only `SCOOP_BUCKET_AUTOMATION_TOKEN`, scoped to Contents and Pull
+requests read/write for this repository, is exposed only to the two trusted-main
+steps that push the exact automation branch and open or update its pull request.
 
-The receiver renders one manifest-only pull request, dispatches the exact head
-through the required `Windows 64bit` and `Windows arm64` jobs, rechecks the
-current base, PR author, single-file allowlist, run identity, and job results,
-then merges through the active `main` ruleset. It explicitly dispatches the
-same native qualification on the resulting merge commit.
+The receiver renders one manifest-only pull request. The bucket-only writer
+credential lets GitHub start its canonical pull-request CI without a per-release
+approval; the credential is never exposed to that CI. The receiver awaits the
+required `Windows 64bit` and `Windows arm64` jobs, rechecks the current base, PR
+author, single-file allowlist, run identity, and job results, then merges through
+the active `main` ruleset. It explicitly dispatches the same native qualification
+on the resulting merge commit.
 There is no per-release approval or merge for the repository owner.
 
 ## Maintaining The Manifest
