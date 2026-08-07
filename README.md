@@ -40,27 +40,42 @@ entry in `release-manifest.json`. Validation also requires:
   `windows-11-arm`; and
 - deliberate hash corruption failing before a shim is installed.
 
-The workflow has only `contents: read`, runs no scheduled updater, and carries
-no cross-repository credential. `checkver` and `autoupdate` describe a future
-candidate; every manifest update still arrives as a reviewed pull request.
+The normal release path is an automatic trusted-main receiver. After the stable
+Git Slop GitHub Release becomes public, its read-only publication verifier
+dispatches only the exact version, release ID, source revision, and release
+manifest digest. This bucket carries no named cross-repository secret: its own
+workflow token is used only after trusted `main` independently reverifies the
+public eight-asset/seven-checksum release.
+
+The receiver renders one manifest-only pull request, dispatches the exact head
+through the required `Windows 64bit` and `Windows arm64` jobs, rechecks the
+current base, PR author, single-file allowlist, run identity, and job results,
+then merges through the active `main` ruleset. It explicitly dispatches the
+same native qualification on the resulting merge commit. There is no
+per-release approval or merge for the repository owner.
 
 ## Maintaining The Manifest
 
-After the new Git Slop release is stable and public, render the candidate from
-its authoritative checksum file:
+The automatic receiver owns normal publication. For local review or an
+explicit recovery, render the candidate from its authoritative checksum file:
 
 ```powershell
 pwsh ./scripts/New-GitSlopManifest.ps1 -Version 0.9.5
 pwsh ./scripts/Test-GitSlopManifest.ps1 -ManifestPath ./bucket/git-slop.json
 ```
 
-Open a pull request only after both commands pass. CI repeats release identity,
-schema, clean-install, uninstall, and bad-hash validation on both supported
-architectures. The Scoop core used in CI is pinned to an immutable revision.
+Both commands are deterministic and idempotent. A receiver recovery uses the
+`Update git-slop manifest` workflow on exact current `main` with the same four
+immutable values from the public release; it never accepts an archive or hash
+that it cannot rederive. CI repeats release identity, schema, clean-install,
+uninstall, and bad-hash validation on both supported architectures. The Scoop
+core used in CI is pinned to an immutable revision.
 
 Repository layout:
 
 - `bucket/`: public manifests discovered by Scoop;
 - `scripts/`: deterministic rendering and validation;
 - `tests/fixtures/`: immutable non-published regression manifests; and
-- `.github/workflows/ci.yml`: read-only native Windows qualification.
+- `.github/workflows/ci.yml`: read-only native Windows qualification; and
+- `.github/workflows/update-git-slop.yml`: trusted release receiver, exact-head
+  qualification, governed merge, and exact-main proof.

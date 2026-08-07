@@ -1,0 +1,586 @@
+name: Update git-slop manifest
+
+run-name: Update git-slop to ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published git-slop version in strict X.Y.Z form
+        required: true
+        type: string
+      revision:
+        description: Exact 40-character source commit for the release
+        required: true
+        type: string
+      release_id:
+        description: Exact numeric GitHub Release ID
+        required: true
+        type: string
+      release_manifest_sha256:
+        description: SHA-256 of the published release-manifest.json
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: git-slop-scoop-publication
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  update:
+    name: Verify, qualify, and publish manifest
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted bucket main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Verify dispatch ran from exact bucket main
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          origin_main="$(git rev-parse origin/main)"
+          live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          test -n "$live_main"
+          test "$GITHUB_SHA" = "$live_main"
+          test "$origin_main" = "$live_main"
+          test "$(git rev-parse HEAD)" = "$live_main"
+          test -z "$(git status --short)"
+
+      - name: Verify public release and render exact manifest
+        id: release
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_REVISION: ${{ inputs.revision }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_REPOSITORY: coreycoto/git-slop
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+          tag="v${RELEASE_VERSION}"
+          release_json="$RUNNER_TEMP/git-slop-release.json"
+          gh api "repos/${SOURCE_REPOSITORY}/releases/${RELEASE_ID}" > "$release_json"
+          jq -e \
+            --arg tag "$tag" \
+            --argjson release_id "$RELEASE_ID" '
+              .id == $release_id and
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == false and
+              (.published_at | type == "string") and
+              (.assets | length) == 8 and
+              all(.assets[]; (.digest | type == "string") and (.digest | test("^sha256:[0-9a-f]{64}$")))
+            ' "$release_json" >/dev/null
+
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          actual_assets="$RUNNER_TEMP/actual-assets.txt"
+          printf '%s\n' \
+            SHA256SUMS \
+            git-slop.rb \
+            "git-slop-${tag}-aarch64-apple-darwin.tar.gz" \
+            "git-slop-${tag}-aarch64-pc-windows-msvc.zip" \
+            "git-slop-${tag}-aarch64-unknown-linux-gnu.tar.gz" \
+            "git-slop-${tag}-x86_64-pc-windows-msvc.zip" \
+            "git-slop-${tag}-x86_64-unknown-linux-gnu.tar.gz" \
+            release-manifest.json | LC_ALL=C sort > "$expected_assets"
+          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort > "$actual_assets"
+          diff -u "$expected_assets" "$actual_assets"
+
+          tag_revision="$(gh api "repos/${SOURCE_REPOSITORY}/commits/${tag}" --jq .sha)"
+          test "$tag_revision" = "$RELEASE_REVISION"
+
+          release_dir="$RUNNER_TEMP/git-slop-release"
+          mkdir "$release_dir"
+          gh release download "$tag" \
+            --repo "$SOURCE_REPOSITORY" \
+            --dir "$release_dir" \
+            --pattern SHA256SUMS \
+            --pattern release-manifest.json
+          test "$(wc -l < "$release_dir/SHA256SUMS" | tr -d ' ')" = 7
+          manifest_sha256="$(sha256sum "$release_dir/release-manifest.json" | awk '{print $1}')"
+          test "$manifest_sha256" = "$EXPECTED_MANIFEST_SHA256"
+          jq -e \
+            --arg digest "sha256:${manifest_sha256}" '
+              [.assets[] | select(.name == "release-manifest.json" and .digest == $digest)] | length == 1
+            ' "$release_json" >/dev/null
+
+          while read -r digest name; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$name" =~ ^[A-Za-z0-9._+-]+$ ]]
+            jq -e \
+              --arg name "$name" \
+              --arg digest "sha256:${digest}" '
+                [.assets[] | select(.name == $name and .digest == $digest)] | length == 1
+              ' "$release_json" >/dev/null
+          done < "$release_dir/SHA256SUMS"
+
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg tag "$tag" \
+            --arg revision "$RELEASE_REVISION" '
+              .schema_version == 3 and
+              .project == "git-slop" and
+              .repository == "coreycoto/git-slop" and
+              .version == $version and
+              .tag == $tag and
+              .revision == $revision and
+              .crate_source.version == $version and
+              .crate_source.revision == $revision and
+              .crate_source.vcs_dirty == false and
+              (.artifacts | length) == 5 and
+              ([.artifacts[].target] | sort) == [
+                "aarch64-apple-darwin",
+                "aarch64-pc-windows-msvc",
+                "aarch64-unknown-linux-gnu",
+                "x86_64-pc-windows-msvc",
+                "x86_64-unknown-linux-gnu"
+              ]
+            ' "$release_dir/release-manifest.json" >/dev/null
+
+          candidate="$RUNNER_TEMP/git-slop.json"
+          pwsh ./scripts/New-GitSlopManifest.ps1 \
+            -Version "$RELEASE_VERSION" \
+            -OutputPath "$candidate"
+          pwsh ./scripts/Test-GitSlopManifest.ps1 \
+            -ManifestPath "$candidate" \
+            -EvidenceDirectory "$RUNNER_TEMP/git-slop-manifest-evidence"
+
+          {
+            echo "candidate=$candidate"
+            echo "manifest-sha256=$manifest_sha256"
+            echo "revision=$RELEASE_REVISION"
+            echo "version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update exact automation branch
+        id: branch
+        env:
+          CANDIDATE: ${{ steps.release.outputs.candidate }}
+          RELEASE_REVISION: ${{ steps.release.outputs.revision }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          branch="automation/git-slop-v${RELEASE_VERSION}"
+          origin_main="$(git rev-parse origin/main)"
+          live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          test -n "$live_main"
+          test "$GITHUB_SHA" = "$live_main"
+          test "$origin_main" = "$live_main"
+          test "$(git rev-parse HEAD)" = "$live_main"
+
+          if test -f bucket/git-slop.json; then
+            current_version="$(jq -er '.version | select(type == "string")' bucket/git-slop.json)"
+            release_order="$(
+              jq -nr \
+                --arg current "$current_version" \
+                --arg incoming "$RELEASE_VERSION" '
+                  def semver: split(".") | map(tonumber);
+                  ($current | semver) as $current_parts |
+                  ($incoming | semver) as $incoming_parts |
+                  if $incoming_parts > $current_parts then
+                    "newer"
+                  elif $incoming_parts == $current_parts then
+                    "same"
+                  else
+                    "older"
+                  end
+                '
+            )"
+            case "$release_order" in
+              newer)
+                ;;
+              same)
+                cmp bucket/git-slop.json "$CANDIDATE"
+                {
+                  echo "branch=$branch"
+                  echo "changed=false"
+                  echo "head-sha=$origin_main"
+                  echo "published=true"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              older)
+                echo "Refusing git-slop downgrade from ${current_version} to ${RELEASE_VERSION}." >&2
+                exit 1
+                ;;
+              *)
+                echo "Unexpected release ordering result: ${release_order}." >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          remote_sha="$(git ls-remote origin "refs/heads/${branch}" | awk 'NR == 1 { print $1 }')"
+          if test -n "$remote_sha"; then
+            git fetch --no-tags origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            remote_parent="$(git rev-parse "${remote_sha}^")"
+            remote_files="$(git diff --name-only --no-renames "${remote_parent}...${remote_sha}" | LC_ALL=C sort)"
+            test "$remote_files" = "bucket/git-slop.json"
+            if test "$remote_parent" = "$origin_main" && \
+              cmp <(git show "${remote_sha}:bucket/git-slop.json") "$CANDIDATE"
+            then
+              git switch --detach "$remote_sha"
+              {
+                echo "branch=$branch"
+                echo "changed=true"
+                echo "head-sha=$remote_sha"
+                echo "published=false"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --force-create "$branch" origin/main
+          install -m 0644 "$CANDIDATE" bucket/git-slop.json
+          git add bucket/git-slop.json
+          test "$(git diff --cached --name-only --no-renames)" = "bucket/git-slop.json"
+          git commit -m "git-slop: update to ${RELEASE_VERSION}"
+          head_sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse "${head_sha}^")" = "$origin_main"
+          test "$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')" = "$origin_main"
+          if test -n "$remote_sha"; then
+            git push \
+              --force-with-lease="refs/heads/${branch}:${remote_sha}" \
+              origin "HEAD:refs/heads/${branch}"
+          else
+            git push origin "HEAD:refs/heads/${branch}"
+          fi
+          test "$(git ls-remote origin "refs/heads/${branch}" | awk 'NR == 1 { print $1 }')" = "$head_sha"
+          {
+            echo "branch=$branch"
+            echo "changed=true"
+            echo "head-sha=$head_sha"
+            echo "published=false"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update manifest pull request
+        id: pull-request
+        if: steps.branch.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.branch.outputs.head-sha }}
+          MANIFEST_SHA256: ${{ steps.release.outputs.manifest-sha256 }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_REVISION: ${{ steps.release.outputs.revision }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          base_sha="$(git rev-parse origin/main)"
+          test "$(git rev-parse "${HEAD_SHA}^")" = "$base_sha"
+          test "$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')" = "$base_sha"
+          test "$(git ls-remote origin "refs/heads/${BRANCH}" | awk 'NR == 1 { print $1 }')" = "$HEAD_SHA"
+
+          pr_body="$RUNNER_TEMP/git-slop-scoop-pr.md"
+          cat > "$pr_body" <<EOF
+          ## Verified release
+
+          - Version: \`${RELEASE_VERSION}\`
+          - Source revision: \`${RELEASE_REVISION}\`
+          - GitHub Release ID: \`${RELEASE_ID}\`
+          - Release manifest SHA-256: \`${MANIFEST_SHA256}\`
+          - Manifest head: \`${HEAD_SHA}\`
+
+          Trusted bucket-main automation independently verified the exact public
+          eight-asset/seven-checksum release, rendered this single manifest, and
+          will merge only this exact head after native Windows x64 and ARM64
+          qualification succeeds.
+          EOF
+          title="git-slop: update to ${RELEASE_VERSION}"
+          body="$(<"$pr_body")"
+          owner="$GITHUB_REPOSITORY_OWNER"
+          pr_number="$(
+            gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f state=open \
+              -f base=main \
+              -f head="${owner}:${BRANCH}" \
+              --jq '.[0].number // empty'
+          )"
+          if test -z "$pr_number"; then
+            pr_number="$(
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/pulls" \
+                -f title="$title" \
+                -f head="$BRANCH" \
+                -f base=main \
+                -f body="$body" \
+                --jq .number
+            )"
+          else
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" \
+              -f title="$title" \
+              -f body="$body" >/dev/null
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" > "$RUNNER_TEMP/pull-request.json"
+          jq -e \
+            --arg branch "$BRANCH" \
+            --arg base_sha "$base_sha" \
+            --arg head_sha "$HEAD_SHA" '
+              .state == "open" and
+              .draft == false and
+              .user.login == "github-actions[bot]" and
+              .base.ref == "main" and
+              .base.sha == $base_sha and
+              .head.ref == $branch and
+              .head.sha == $head_sha
+            ' "$RUNNER_TEMP/pull-request.json" >/dev/null
+          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq .html_url
+
+      - name: Dispatch and await exact-head Windows qualification
+        id: qualification
+        if: steps.branch.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.branch.outputs.head-sha }}
+        run: |
+          workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml" --jq .id)"
+          runs_path="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?branch=${BRANCH}&event=workflow_dispatch&per_page=100"
+          gh api "$runs_path" > "$RUNNER_TEMP/qualification-runs.json"
+          run_id="$(
+            jq -r \
+              --arg head "$HEAD_SHA" '
+                [.workflow_runs[] |
+                  select(
+                    .head_sha == $head and
+                    (.status != "completed" or .conclusion == "success")
+                  )
+                ] | sort_by(.id) | last | .id // empty
+              ' "$RUNNER_TEMP/qualification-runs.json"
+          )"
+          if test -z "$run_id"; then
+            max_before="$(jq -r '[.workflow_runs[].id] | max // 0' "$RUNNER_TEMP/qualification-runs.json")"
+            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+            for attempt in $(seq 1 30); do
+              gh api "$runs_path" > "$RUNNER_TEMP/qualification-runs.json"
+              run_id="$(
+                jq -r \
+                  --arg head "$HEAD_SHA" \
+                  --argjson max_before "$max_before" '
+                    [.workflow_runs[] |
+                      select(.id > $max_before and .head_sha == $head)
+                    ] | sort_by(.id) | first | .id // empty
+                  ' "$RUNNER_TEMP/qualification-runs.json"
+              )"
+              test -n "$run_id" && break
+              test "$attempt" != 30
+              sleep 2
+            done
+          fi
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "$RUNNER_TEMP/qualification-run.json"
+          jq -e \
+            --arg branch "$BRANCH" \
+            --arg head "$HEAD_SHA" \
+            --argjson workflow_id "$workflow_id" \
+            --argjson run_id "$run_id" '
+              .id == $run_id and
+              .workflow_id == $workflow_id and
+              .event == "workflow_dispatch" and
+              .head_branch == $branch and
+              .head_sha == $head and
+              .status == "completed" and
+              .conclusion == "success"
+            ' "$RUNNER_TEMP/qualification-run.json" >/dev/null
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+            > "$RUNNER_TEMP/qualification-jobs.json"
+          jq -e '
+            .total_count == 2 and
+            ([.jobs[].name] | sort) == ["Windows 64bit", "Windows arm64"] and
+            all(.jobs[]; .status == "completed" and .conclusion == "success")
+          ' "$RUNNER_TEMP/qualification-jobs.json" >/dev/null
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "run-url=$(jq -r .html_url "$RUNNER_TEMP/qualification-run.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Reverify exact PR head and governed-merge
+        id: merge
+        if: steps.branch.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.branch.outputs.head-sha }}
+          PULL_REQUEST: ${{ steps.pull-request.outputs.number }}
+          QUALIFICATION_RUN_ID: ${{ steps.qualification.outputs.run-id }}
+        run: |
+          base_sha="$(git rev-parse origin/main)"
+          live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          remote_head="$(git ls-remote origin "refs/heads/${BRANCH}" | awk 'NR == 1 { print $1 }')"
+          test "$live_main" = "$base_sha"
+          test "$remote_head" = "$HEAD_SHA"
+          test "$(git rev-parse "${HEAD_SHA}^")" = "$base_sha"
+
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}" > "$RUNNER_TEMP/final-pr.json"
+          jq -e \
+            --arg branch "$BRANCH" \
+            --arg base_sha "$base_sha" \
+            --arg head_sha "$HEAD_SHA" '
+              .state == "open" and
+              .draft == false and
+              .user.login == "github-actions[bot]" and
+              .base.ref == "main" and
+              .base.sha == $base_sha and
+              .head.ref == $branch and
+              .head.sha == $head_sha
+            ' "$RUNNER_TEMP/final-pr.json" >/dev/null
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}/files?per_page=100" \
+            > "$RUNNER_TEMP/final-pr-files.json"
+          jq -e '
+            flatten |
+            length == 1 and
+            .[0].filename == "bucket/git-slop.json" and
+            (.[0].status == "added" or .[0].status == "modified")
+          ' "$RUNNER_TEMP/final-pr-files.json" >/dev/null
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}" \
+            > "$RUNNER_TEMP/final-qualification-run.json"
+          jq -e \
+            --arg branch "$BRANCH" \
+            --arg head "$HEAD_SHA" \
+            --argjson run_id "$QUALIFICATION_RUN_ID" '
+              .id == $run_id and
+              .event == "workflow_dispatch" and
+              .head_branch == $branch and
+              .head_sha == $head and
+              .status == "completed" and
+              .conclusion == "success"
+            ' "$RUNNER_TEMP/final-qualification-run.json" >/dev/null
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}/jobs?per_page=100" \
+            > "$RUNNER_TEMP/final-qualification-jobs.json"
+          jq -e '
+            .total_count == 2 and
+            ([.jobs[].name] | sort) == ["Windows 64bit", "Windows arm64"] and
+            all(.jobs[]; .status == "completed" and .conclusion == "success")
+          ' "$RUNNER_TEMP/final-qualification-jobs.json" >/dev/null
+
+          gh api --method PUT \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}/merge" \
+            -f sha="$HEAD_SHA" \
+            -f merge_method=merge \
+            > "$RUNNER_TEMP/merge.json"
+          jq -e '.merged == true and (.sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/merge.json" >/dev/null
+          merge_sha="$(jq -r .sha "$RUNNER_TEMP/merge.json")"
+          for attempt in $(seq 1 20); do
+            live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+            test "$live_main" = "$merge_sha" && break
+            test "$attempt" != 20
+            sleep 2
+          done
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${merge_sha}" > "$RUNNER_TEMP/merge-commit.json"
+          jq -e \
+            --arg base "$base_sha" \
+            --arg head "$HEAD_SHA" \
+            --arg merge "$merge_sha" '
+              .sha == $merge and
+              (.parents | length) == 2 and
+              .parents[0].sha == $base and
+              .parents[1].sha == $head and
+              (.files | length) == 1 and
+              .files[0].filename == "bucket/git-slop.json"
+            ' "$RUNNER_TEMP/merge-commit.json" >/dev/null
+          echo "merge-sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch and await exact-main qualification
+        id: main-qualification
+        if: steps.branch.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge-sha }}
+        run: |
+          workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml" --jq .id)"
+          runs_path="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?branch=main&event=workflow_dispatch&per_page=100"
+          gh api "$runs_path" > "$RUNNER_TEMP/main-runs.json"
+          max_before="$(jq -r '[.workflow_runs[].id] | max // 0' "$RUNNER_TEMP/main-runs.json")"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main
+          run_id=""
+          for attempt in $(seq 1 30); do
+            gh api "$runs_path" > "$RUNNER_TEMP/main-runs.json"
+            run_id="$(
+              jq -r \
+                --arg head "$MERGE_SHA" \
+                --argjson max_before "$max_before" '
+                  [.workflow_runs[] |
+                    select(.id > $max_before and .head_sha == $head)
+                  ] | sort_by(.id) | first | .id // empty
+                ' "$RUNNER_TEMP/main-runs.json"
+            )"
+            test -n "$run_id" && break
+            test "$attempt" != 30
+            sleep 2
+          done
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "$RUNNER_TEMP/main-run.json"
+          jq -e \
+            --arg head "$MERGE_SHA" \
+            --argjson workflow_id "$workflow_id" \
+            --argjson run_id "$run_id" '
+              .id == $run_id and
+              .workflow_id == $workflow_id and
+              .event == "workflow_dispatch" and
+              .head_branch == "main" and
+              .head_sha == $head and
+              .status == "completed" and
+              .conclusion == "success"
+            ' "$RUNNER_TEMP/main-run.json" >/dev/null
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+            > "$RUNNER_TEMP/main-jobs.json"
+          jq -e '
+            .total_count == 2 and
+            ([.jobs[].name] | sort) == ["Windows 64bit", "Windows arm64"] and
+            all(.jobs[]; .status == "completed" and .conclusion == "success")
+          ' "$RUNNER_TEMP/main-jobs.json" >/dev/null
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "run-url=$(jq -r .html_url "$RUNNER_TEMP/main-run.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize trusted Scoop publication
+        if: always()
+        env:
+          AUTOMATION_BRANCH: ${{ steps.branch.outputs.branch }}
+          CHANGED: ${{ steps.branch.outputs.changed }}
+          MANIFEST_HEAD: ${{ steps.branch.outputs.head-sha }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge-sha }}
+          PULL_REQUEST: ${{ steps.pull-request.outputs.number }}
+          QUALIFICATION_RUN_URL: ${{ steps.qualification.outputs.run-url }}
+          RELEASE_REVISION: ${{ steps.release.outputs.revision }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          MAIN_RUN_URL: ${{ steps.main-qualification.outputs.run-url }}
+        run: |
+          {
+            echo "## Trusted Git Slop Scoop publication"
+            echo
+            echo "- Release version: \`${RELEASE_VERSION}\`"
+            echo "- Release revision: \`${RELEASE_REVISION}\`"
+            echo "- Manifest changed: \`${CHANGED}\`"
+            echo "- Automation branch: \`${AUTOMATION_BRANCH}\`"
+            echo "- Manifest head: \`${MANIFEST_HEAD}\`"
+            if test -n "$PULL_REQUEST"; then
+              echo "- Pull request: #${PULL_REQUEST}"
+              echo "- Exact-head qualification: ${QUALIFICATION_RUN_URL}"
+              echo "- Merge commit: \`${MERGE_SHA}\`"
+              echo "- Exact-main qualification: ${MAIN_RUN_URL}"
+              echo "- Result: the single manifest was governed-merged after native Windows x64 and ARM64 qualification."
+            else
+              echo "- Result: the exact release manifest was already published on bucket main."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
