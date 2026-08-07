@@ -51,8 +51,8 @@ The receiver renders one manifest-only pull request, dispatches the exact head
 through the required `Windows 64bit` and `Windows arm64` jobs, rechecks the
 current base, PR author, single-file allowlist, run identity, and job results,
 then merges through the active `main` ruleset. It explicitly dispatches the
-same native qualification on the resulting merge commit. There is no
-per-release approval or merge for the repository owner.
+same native qualification on the resulting merge commit.
+There is no per-release approval or merge for the repository owner.
 
 ## Maintaining The Manifest
 
