@@ -28,8 +28,7 @@ if (-not $IsWindows) {
 }
 
 $manifestFile = (Resolve-Path -LiteralPath $ManifestPath).Path
-$scoopHomePath = (Resolve-Path -LiteralPath $ScoopHome).Path
-$scoopScript = Join-Path $scoopHomePath 'bin\scoop.ps1'
+$scoopSourcePath = (Resolve-Path -LiteralPath $ScoopHome).Path
 $releaseManifest = Get-Content -LiteralPath $ReleaseManifestPath -Raw | ConvertFrom-Json
 $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
 $version = [string] $manifest.version
@@ -41,11 +40,27 @@ if ([string] $selected.url -cnotmatch "git-slop-v$([regex]::Escape($version))-$(
 $env:SCOOP = Join-Path $env:RUNNER_TEMP 'git-slop-scoop-user'
 $env:SCOOP_GLOBAL = Join-Path $env:RUNNER_TEMP 'git-slop-scoop-global'
 $env:SCOOP_CACHE = Join-Path $env:RUNNER_TEMP 'git-slop-scoop-cache'
-$env:SCOOP_HOME = $scoopHomePath
-foreach ($directory in @($env:SCOOP, $env:SCOOP_GLOBAL, $env:SCOOP_CACHE)) {
+$shimDirectory = Join-Path $env:SCOOP 'shims'
+$bucketDirectory = Join-Path $env:SCOOP 'buckets'
+$installedScoopHome = Join-Path $env:SCOOP 'apps\scoop\current'
+foreach ($directory in @(
+    $env:SCOOP,
+    $env:SCOOP_GLOBAL,
+    $env:SCOOP_CACHE,
+    $shimDirectory,
+    $bucketDirectory,
+    $installedScoopHome
+)) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
-$shimDirectory = Join-Path $env:SCOOP 'shims'
+
+# Scoop resolves its shim helper from apps\scoop\current, even when its entry
+# point is invoked from a separate source checkout.
+Get-ChildItem -LiteralPath $scoopSourcePath -Force |
+    Where-Object { $_.Name -cne '.git' } |
+    Copy-Item -Destination $installedScoopHome -Recurse -Force
+$scoopScript = Join-Path $installedScoopHome 'bin\scoop.ps1'
+$env:SCOOP_HOME = $installedScoopHome
 $env:PATH = "$shimDirectory;$env:PATH"
 
 function Invoke-Scoop {
