@@ -100,9 +100,6 @@ Invoke-WebRequest -Uri "$releaseBase/SHA256SUMS" -OutFile $checksumsPath -Header
 
 $checksumByName = @{}
 $checksumLines = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -ne '' })
-if ($checksumLines.Count -ne 7) {
-    throw "SHA256SUMS must contain exactly seven non-empty entries; found $($checksumLines.Count)."
-}
 foreach ($line in $checksumLines) {
     if ($line -cnotmatch '^(?<hash>[a-f0-9]{64})  (?<name>[A-Za-z0-9._+-]+)$') {
         throw "Invalid SHA256SUMS entry: $line"
@@ -112,20 +109,6 @@ foreach ($line in $checksumLines) {
     }
     $checksumByName[$Matches.name] = $Matches.hash
 }
-
-$expectedChecksumNames = @(
-    'release-manifest.json'
-    'git-slop.rb'
-    "git-slop-v$version-x86_64-unknown-linux-gnu.tar.gz"
-    "git-slop-v$version-aarch64-unknown-linux-gnu.tar.gz"
-    "git-slop-v$version-aarch64-apple-darwin.tar.gz"
-    "git-slop-v$version-x86_64-pc-windows-msvc.zip"
-    "git-slop-v$version-aarch64-pc-windows-msvc.zip"
-)
-Assert-ExactSet @($checksumByName.Keys) $expectedChecksumNames 'SHA256SUMS filenames'
-
-$releaseManifestDigest = (Get-FileHash -LiteralPath $releaseManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-Assert-Equal $releaseManifestDigest $checksumByName['release-manifest.json'] 'release-manifest.json SHA-256'
 
 $releaseManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
 Assert-Equal $releaseManifest.schema_version 3 'Release manifest schema version'
@@ -140,21 +123,47 @@ Assert-Equal $releaseManifest.crate_source.version $version 'Crate-source versio
 Assert-Equal $releaseManifest.crate_source.revision $releaseManifest.revision 'Crate-source revision'
 Assert-Equal $releaseManifest.crate_source.vcs_dirty $false 'Crate-source dirty flag'
 
-$expectedTargets = @(
-    'x86_64-unknown-linux-gnu',
-    'aarch64-unknown-linux-gnu',
-    'aarch64-apple-darwin',
-    'x86_64-pc-windows-msvc',
-    'aarch64-pc-windows-msvc'
-)
-if (@($releaseManifest.artifacts).Count -ne 5) {
-    throw "Release manifest must contain exactly five native artifacts."
+$releaseArtifacts = @($releaseManifest.artifacts)
+if ($releaseArtifacts.Count -eq 0) {
+    throw 'Release manifest must contain at least one native artifact.'
 }
-Assert-ExactSet @($releaseManifest.artifacts.target) $expectedTargets 'Release manifest targets'
+$artifactNames = @($releaseArtifacts | ForEach-Object { [string] $_.name })
+$artifactTargets = @($releaseArtifacts | ForEach-Object { [string] $_.target })
+if (
+    @($artifactNames | Sort-Object -Unique).Count -ne $artifactNames.Count -or
+    @($artifactTargets | Sort-Object -Unique).Count -ne $artifactTargets.Count
+) {
+    throw 'Release manifest artifact names and targets must be unique.'
+}
+foreach ($artifact in $releaseArtifacts) {
+    if ([string] $artifact.target -cnotmatch '^[A-Za-z0-9_+-]+$') {
+        throw "Release manifest target '$($artifact.target)' is invalid."
+    }
+    if ([string] $artifact.archive -cne 'zip' -and [string] $artifact.archive -cne 'tar.gz') {
+        throw "Release manifest archive '$($artifact.archive)' is invalid."
+    }
+    $expectedName = "git-slop-v$version-$($artifact.target).$($artifact.archive)"
+    Assert-Equal $artifact.name $expectedName "$($artifact.target) artifact name"
+    Assert-Equal $artifact.path $expectedName "$($artifact.target) artifact path"
+    Assert-Equal $artifact.url "$releaseBase/$expectedName" "$($artifact.target) artifact URL"
+    if ([string] $artifact.sha256 -cnotmatch '^[a-f0-9]{64}$') {
+        throw "$($artifact.target) artifact hash must be one lowercase SHA-256 value."
+    }
+}
+
+$expectedChecksumNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
+Assert-ExactSet @($checksumByName.Keys) $expectedChecksumNames 'SHA256SUMS filenames'
+
+$releaseManifestDigest = (Get-FileHash -LiteralPath $releaseManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Assert-Equal $releaseManifestDigest $checksumByName['release-manifest.json'] 'release-manifest.json SHA-256'
+
+foreach ($artifact in $releaseArtifacts) {
+    Assert-Equal $artifact.sha256 $checksumByName[$artifact.name] "$($artifact.target) release-manifest hash"
+}
 foreach ($entry in $targetByArchitecture.GetEnumerator()) {
     $target = $entry.Value
     $archive = "git-slop-v$version-$target.zip"
-    $artifacts = @($releaseManifest.artifacts | Where-Object { $_.target -ceq $target })
+    $artifacts = @($releaseArtifacts | Where-Object { $_.target -ceq $target })
     if ($artifacts.Count -ne 1) {
         throw "Release manifest must contain exactly one artifact for $target."
     }
@@ -163,8 +172,9 @@ foreach ($entry in $targetByArchitecture.GetEnumerator()) {
     Assert-Equal $artifact.path $archive "$target artifact path"
     Assert-Equal $artifact.archive 'zip' "$target archive type"
     Assert-Equal $artifact.os 'windows' "$target operating system"
+    $expectedArch = if ($entry.Key -ceq '64bit') { 'x86_64' } else { 'aarch64' }
+    Assert-Equal $artifact.arch $expectedArch "$target architecture"
     Assert-Equal $artifact.url "$releaseBase/$archive" "$target artifact URL"
-    Assert-Equal $artifact.sha256 $checksumByName[$archive] "$target release-manifest hash"
     Assert-Equal $manifestHashByArchive[$archive] $checksumByName[$archive] "$target Scoop hash"
 }
 

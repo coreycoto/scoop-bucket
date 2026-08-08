@@ -29,10 +29,14 @@ Upgrade in place with `scoop update git-slop`. Uninstall with
 
 The manifest supports native Windows x86-64 and ARM64. Each architecture entry
 must name its exact `git-slop-v<version>-<target>.zip`, use the literal SHA-256
-from the release's seven-line `SHA256SUMS`, and agree with the corresponding
-entry in `release-manifest.json`. Validation also requires:
+from the release's `SHA256SUMS`, and agree with the corresponding entry in
+`release-manifest.json`. The receiver derives the complete archive and checksum
+inventory from that signed manifest, so adding a non-Windows distribution
+target does not require a matching hard-coded count update here. Validation
+still requires:
 
-- one stable public release with the exact eight-asset inventory;
+- one stable public release whose assets exactly match its manifest-derived
+  archives plus the checksum, Formula, and manifest control files;
 - GitHub asset digests matching `SHA256SUMS`;
 - the public tag, release manifest, and installed `build-info` sharing one full
   source revision with `source_dirty: false`;

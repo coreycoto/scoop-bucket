@@ -8,9 +8,13 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $receiverPath = Join-Path $repositoryRoot '.github/workflows/update-git-slop.yml'
 $ciPath = Join-Path $repositoryRoot '.github/workflows/ci.yml'
 $readmePath = Join-Path $repositoryRoot 'README.md'
+$rendererPath = Join-Path $repositoryRoot 'scripts/New-GitSlopManifest.ps1'
+$validatorPath = Join-Path $repositoryRoot 'scripts/Test-GitSlopManifest.ps1'
 $receiver = Get-Content -LiteralPath $receiverPath -Raw
 $ci = Get-Content -LiteralPath $ciPath -Raw
 $readme = Get-Content -LiteralPath $readmePath -Raw
+$renderer = Get-Content -LiteralPath $rendererPath -Raw
+$validator = Get-Content -LiteralPath $validatorPath -Raw
 
 function Require-Text {
     param(
@@ -60,10 +64,14 @@ foreach ($required in @(
     'persist-credentials: false',
     'Verify dispatch ran from exact bucket main',
     'test "$GITHUB_SHA" = "$live_main"',
-    '(.assets | length) == 8',
     'test "$tag_revision" = "$RELEASE_REVISION"',
     'test "$manifest_sha256" = "$EXPECTED_MANIFEST_SHA256"',
-    'test "$(wc -l < "$release_dir/SHA256SUMS" | tr -d '' '')" = 7',
+    '([.artifacts[].name] | unique | length) == (.artifacts | length)',
+    'jq -r ''.artifacts[].name'' "$release_dir/release-manifest.json"',
+    'expected_checksums="$RUNNER_TEMP/expected-checksums.txt"',
+    '.target == "x86_64-pc-windows-msvc"',
+    '.target == "aarch64-pc-windows-msvc"',
+    'manifest-derived release inventory',
     './scripts/New-GitSlopManifest.ps1',
     './scripts/Test-GitSlopManifest.ps1',
     'branch="automation/git-slop-v${RELEASE_VERSION}"',
@@ -101,12 +109,37 @@ foreach ($forbidden in @(
     'HEAD:refs/heads/main',
     'gh release create',
     'gh release upload',
-    'git tag '
+    'git tag ',
+    '(.assets | length) == 8',
+    '(.artifacts | length) == 5',
+    'eight-asset/seven-checksum'
 )) {
     Reject-Text -Text $receiver -Rejected $forbidden -Label 'update-git-slop.yml'
 }
 
 Require-Count -Text $receiver -Expected 'GH_TOKEN: ${{ secrets.SCOOP_BUCKET_AUTOMATION_TOKEN }}' -Count 2 -Label 'update-git-slop.yml'
+
+foreach ($script in @(
+    @{ Label = 'New-GitSlopManifest.ps1'; Text = $renderer },
+    @{ Label = 'Test-GitSlopManifest.ps1'; Text = $validator }
+)) {
+    foreach ($required in @(
+        '$releaseManifest.artifacts',
+        '$artifactNames',
+        "'x86_64-pc-windows-msvc'",
+        "'aarch64-pc-windows-msvc'",
+        "@('release-manifest.json', 'git-slop.rb')"
+    )) {
+        Require-Text -Text $script.Text -Expected $required -Label $script.Label
+    }
+    foreach ($forbidden in @(
+        'Count -ne 7',
+        'exactly seven',
+        'exactly five'
+    )) {
+        Reject-Text -Text $script.Text -Rejected $forbidden -Label $script.Label
+    }
+}
 
 foreach ($required in @(
     'pull_request:',

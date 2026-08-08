@@ -87,23 +87,8 @@ jobs:
               .draft == false and
               .prerelease == false and
               (.published_at | type == "string") and
-              (.assets | length) == 8 and
               all(.assets[]; (.digest | type == "string") and (.digest | test("^sha256:[0-9a-f]{64}$")))
             ' "$release_json" >/dev/null
-
-          expected_assets="$RUNNER_TEMP/expected-assets.txt"
-          actual_assets="$RUNNER_TEMP/actual-assets.txt"
-          printf '%s\n' \
-            SHA256SUMS \
-            git-slop.rb \
-            "git-slop-${tag}-aarch64-apple-darwin.tar.gz" \
-            "git-slop-${tag}-aarch64-pc-windows-msvc.zip" \
-            "git-slop-${tag}-aarch64-unknown-linux-gnu.tar.gz" \
-            "git-slop-${tag}-x86_64-pc-windows-msvc.zip" \
-            "git-slop-${tag}-x86_64-unknown-linux-gnu.tar.gz" \
-            release-manifest.json | LC_ALL=C sort > "$expected_assets"
-          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort > "$actual_assets"
-          diff -u "$expected_assets" "$actual_assets"
 
           tag_revision="$(gh api "repos/${SOURCE_REPOSITORY}/commits/${tag}" --jq .sha)"
           test "$tag_revision" = "$RELEASE_REVISION"
@@ -115,9 +100,71 @@ jobs:
             --dir "$release_dir" \
             --pattern SHA256SUMS \
             --pattern release-manifest.json
-          test "$(wc -l < "$release_dir/SHA256SUMS" | tr -d ' ')" = 7
           manifest_sha256="$(sha256sum "$release_dir/release-manifest.json" | awk '{print $1}')"
           test "$manifest_sha256" = "$EXPECTED_MANIFEST_SHA256"
+
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg tag "$tag" \
+            --arg revision "$RELEASE_REVISION" \
+            --arg release_base "https://github.com/${SOURCE_REPOSITORY}/releases/download/${tag}" '
+              .schema_version == 3 and
+              .project == "git-slop" and
+              .repository == "coreycoto/git-slop" and
+              .version == $version and
+              .tag == $tag and
+              .revision == $revision and
+              .crate_source.version == $version and
+              .crate_source.revision == $revision and
+              .crate_source.vcs_dirty == false and
+              (.artifacts | type == "array") and
+              (.artifacts | length) > 0 and
+              ([.artifacts[].name] | unique | length) == (.artifacts | length) and
+              ([.artifacts[].target] | unique | length) == (.artifacts | length) and
+              all(.artifacts[];
+                (.target | type == "string") and
+                (.target | test("^[A-Za-z0-9_+-]+$")) and
+                (.archive == "zip" or .archive == "tar.gz") and
+                .name == ("git-slop-" + $tag + "-" + .target + "." + .archive) and
+                .path == .name and
+                .url == ($release_base + "/" + .name) and
+                (.sha256 | type == "string") and
+                (.sha256 | test("^[0-9a-f]{64}$")) and
+                (.size_bytes | type == "number") and
+                .size_bytes > 0
+              ) and
+              ([.artifacts[] | select(
+                .target == "x86_64-pc-windows-msvc" and
+                .os == "windows" and
+                .arch == "x86_64" and
+                .archive == "zip"
+              )] | length) == 1 and
+              ([.artifacts[] | select(
+                .target == "aarch64-pc-windows-msvc" and
+                .os == "windows" and
+                .arch == "aarch64" and
+                .archive == "zip"
+              )] | length) == 1
+            ' "$release_dir/release-manifest.json" >/dev/null
+
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          actual_assets="$RUNNER_TEMP/actual-assets.txt"
+          {
+            jq -r '.artifacts[].name' "$release_dir/release-manifest.json"
+            printf '%s\n' SHA256SUMS git-slop.rb release-manifest.json
+          } | LC_ALL=C sort > "$expected_assets"
+          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort > "$actual_assets"
+          diff -u "$expected_assets" "$actual_assets"
+
+          expected_checksums="$RUNNER_TEMP/expected-checksums.txt"
+          actual_checksums="$RUNNER_TEMP/actual-checksums.txt"
+          {
+            jq -r '.artifacts[].name' "$release_dir/release-manifest.json"
+            printf '%s\n' git-slop.rb release-manifest.json
+          } | LC_ALL=C sort > "$expected_checksums"
+          awk '{ print $2 }' "$release_dir/SHA256SUMS" | LC_ALL=C sort > "$actual_checksums"
+          diff -u "$expected_checksums" "$actual_checksums"
+
           jq -e \
             --arg digest "sha256:${manifest_sha256}" '
               [.assets[] | select(.name == "release-manifest.json" and .digest == $digest)] | length == 1
@@ -133,28 +180,10 @@ jobs:
               ' "$release_json" >/dev/null
           done < "$release_dir/SHA256SUMS"
 
-          jq -e \
-            --arg version "$RELEASE_VERSION" \
-            --arg tag "$tag" \
-            --arg revision "$RELEASE_REVISION" '
-              .schema_version == 3 and
-              .project == "git-slop" and
-              .repository == "coreycoto/git-slop" and
-              .version == $version and
-              .tag == $tag and
-              .revision == $revision and
-              .crate_source.version == $version and
-              .crate_source.revision == $revision and
-              .crate_source.vcs_dirty == false and
-              (.artifacts | length) == 5 and
-              ([.artifacts[].target] | sort) == [
-                "aarch64-apple-darwin",
-                "aarch64-pc-windows-msvc",
-                "aarch64-unknown-linux-gnu",
-                "x86_64-pc-windows-msvc",
-                "x86_64-unknown-linux-gnu"
-              ]
-            ' "$release_dir/release-manifest.json" >/dev/null
+          while IFS=$'\t' read -r name digest; do
+            checksum_digest="$(awk -v name="$name" '$2 == name { print $1 }' "$release_dir/SHA256SUMS")"
+            test "$checksum_digest" = "$digest"
+          done < <(jq -r '.artifacts[] | [.name, .sha256] | @tsv' "$release_dir/release-manifest.json")
 
           candidate="$RUNNER_TEMP/git-slop.json"
           pwsh ./scripts/New-GitSlopManifest.ps1 \
@@ -304,7 +333,7 @@ jobs:
           - Manifest head: \`${HEAD_SHA}\`
 
           Trusted bucket-main automation independently verified the exact public
-          eight-asset/seven-checksum release, rendered this single manifest, and
+          manifest-derived release inventory, rendered this single manifest, and
           will merge only this exact head after native Windows x64 and ARM64
           qualification succeeds.
           EOF
