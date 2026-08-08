@@ -16,18 +16,56 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 
 $releaseBase = "https://github.com/coreycoto/git-slop/releases/download/v$Version"
 $checksumsUrl = "$releaseBase/SHA256SUMS"
+$releaseManifestUrl = "$releaseBase/release-manifest.json"
 $temporaryChecksums = Join-Path ([System.IO.Path]::GetTempPath()) "git-slop-$Version-SHA256SUMS"
+$temporaryReleaseManifest = Join-Path ([System.IO.Path]::GetTempPath()) "git-slop-$Version-release-manifest.json"
 
 Invoke-WebRequest -Uri $checksumsUrl -OutFile $temporaryChecksums -Headers @{
     'User-Agent' = 'coreycoto-scoop-bucket-renderer/1'
 }
+Invoke-WebRequest -Uri $releaseManifestUrl -OutFile $temporaryReleaseManifest -Headers @{
+    'User-Agent' = 'coreycoto-scoop-bucket-renderer/1'
+}
+
+$releaseManifest = Get-Content -LiteralPath $temporaryReleaseManifest -Raw | ConvertFrom-Json
+if (
+    [int] $releaseManifest.schema_version -ne 3 -or
+    [string] $releaseManifest.project -cne 'git-slop' -or
+    [string] $releaseManifest.repository -cne 'coreycoto/git-slop' -or
+    [string] $releaseManifest.version -cne $Version -or
+    [string] $releaseManifest.tag -cne "v$Version"
+) {
+    throw 'release-manifest.json does not match the requested Git Slop release identity.'
+}
+
+$releaseArtifacts = @($releaseManifest.artifacts)
+if ($releaseArtifacts.Count -eq 0) {
+    throw 'release-manifest.json must contain at least one artifact.'
+}
+$artifactNames = @($releaseArtifacts | ForEach-Object { [string] $_.name })
+$artifactTargets = @($releaseArtifacts | ForEach-Object { [string] $_.target })
+if (
+    @($artifactNames | Sort-Object -Unique).Count -ne $artifactNames.Count -or
+    @($artifactTargets | Sort-Object -Unique).Count -ne $artifactTargets.Count
+) {
+    throw 'release-manifest.json artifact names and targets must be unique.'
+}
+foreach ($artifact in $releaseArtifacts) {
+    $expectedName = "git-slop-v$Version-$($artifact.target).$($artifact.archive)"
+    if (
+        [string] $artifact.target -cnotmatch '^[A-Za-z0-9_+-]+$' -or
+        ([string] $artifact.archive -cne 'zip' -and [string] $artifact.archive -cne 'tar.gz') -or
+        [string] $artifact.name -cne $expectedName -or
+        [string] $artifact.path -cne $expectedName -or
+        [string] $artifact.url -cne "$releaseBase/$expectedName" -or
+        [string] $artifact.sha256 -cnotmatch '^[a-f0-9]{64}$'
+    ) {
+        throw "Invalid release-manifest.json artifact contract for '$($artifact.target)'."
+    }
+}
 
 $checksumByName = @{}
 $checksumLines = @(Get-Content -LiteralPath $temporaryChecksums | Where-Object { $_ -ne '' })
-if ($checksumLines.Count -ne 7) {
-    throw "SHA256SUMS must contain exactly seven non-empty entries; found $($checksumLines.Count)."
-}
-
 foreach ($line in $checksumLines) {
     if ($line -cnotmatch '^(?<hash>[a-f0-9]{64})  (?<name>[A-Za-z0-9._+-]+)$') {
         throw "Invalid SHA256SUMS entry: $line"
@@ -42,25 +80,46 @@ $targetByArchitecture = [ordered]@{
     '64bit' = 'x86_64-pc-windows-msvc'
     'arm64' = 'aarch64-pc-windows-msvc'
 }
-$expectedNames = @(
-    'release-manifest.json'
-    'git-slop.rb'
-    "git-slop-v$Version-x86_64-unknown-linux-gnu.tar.gz"
-    "git-slop-v$Version-aarch64-unknown-linux-gnu.tar.gz"
-    "git-slop-v$Version-aarch64-apple-darwin.tar.gz"
-    "git-slop-v$Version-x86_64-pc-windows-msvc.zip"
-    "git-slop-v$Version-aarch64-pc-windows-msvc.zip"
-)
+$expectedNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
 $actualNames = @($checksumByName.Keys | Sort-Object)
 $nameDifference = @(Compare-Object -ReferenceObject @($expectedNames | Sort-Object) -DifferenceObject $actualNames)
-if ($nameDifference.Count -ne 0) {
-    throw "SHA256SUMS does not match the exact seven-entry Git Slop release contract."
+if ($nameDifference.Count -ne 0 -or $actualNames.Count -ne $expectedNames.Count) {
+    throw 'SHA256SUMS does not match the manifest-derived Git Slop release contract.'
+}
+$releaseManifestDigest = (Get-FileHash -LiteralPath $temporaryReleaseManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+if ([string] $checksumByName['release-manifest.json'] -cne $releaseManifestDigest) {
+    throw 'SHA256SUMS does not match the downloaded release-manifest.json.'
+}
+foreach ($artifact in $releaseArtifacts) {
+    if ([string] $checksumByName[$artifact.name] -cne [string] $artifact.sha256) {
+        throw "SHA256SUMS does not match release-manifest.json for '$($artifact.name)'."
+    }
 }
 
 $architecture = [ordered]@{}
 $autoupdateArchitecture = [ordered]@{}
 foreach ($entry in $targetByArchitecture.GetEnumerator()) {
+    $artifacts = @($releaseArtifacts | Where-Object { $_.target -ceq $entry.Value })
+    if ($artifacts.Count -ne 1) {
+        throw "release-manifest.json must contain exactly one artifact for $($entry.Value)."
+    }
+    $artifact = $artifacts[0]
     $archive = "git-slop-v$Version-$($entry.Value).zip"
+    if (
+        [string] $artifact.name -cne $archive -or
+        [string] $artifact.archive -cne 'zip' -or
+        [string] $artifact.os -cne 'windows' -or
+        (
+            $entry.Key -ceq '64bit' -and
+            [string] $artifact.arch -cne 'x86_64'
+        ) -or
+        (
+            $entry.Key -ceq 'arm64' -and
+            [string] $artifact.arch -cne 'aarch64'
+        )
+    ) {
+        throw "Invalid Windows artifact contract for $($entry.Value)."
+    }
     $architecture[$entry.Key] = [ordered]@{
         url = "$releaseBase/$archive"
         hash = $checksumByName[$archive]
