@@ -151,8 +151,13 @@ foreach ($artifact in $releaseArtifacts) {
     }
 }
 
-$expectedChecksumNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
-Assert-ExactSet @($checksumByName.Keys) $expectedChecksumNames 'SHA256SUMS filenames'
+$requiredChecksumNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
+$missingChecksumNames = @(
+    $requiredChecksumNames | Where-Object { -not $checksumByName.ContainsKey($_) }
+)
+if ($missingChecksumNames.Count -ne 0) {
+    throw "SHA256SUMS is missing required release assets: $($missingChecksumNames -join ', ')."
+}
 
 $releaseManifestDigest = (Get-FileHash -LiteralPath $releaseManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-Equal $releaseManifestDigest $checksumByName['release-manifest.json'] 'release-manifest.json SHA-256'
@@ -183,9 +188,9 @@ $release = Invoke-RestMethod -Uri $releaseApiUrl -Headers $headers
 Assert-Equal $release.tag_name "v$version" 'Public release tag'
 Assert-Equal $release.draft $false 'Public release draft flag'
 Assert-Equal $release.prerelease $false 'Public release prerelease flag'
-$expectedReleaseAssets = @($expectedChecksumNames + 'SHA256SUMS')
+$expectedReleaseAssets = @(@($checksumByName.Keys) + 'SHA256SUMS')
 Assert-ExactSet @($release.assets.name) $expectedReleaseAssets 'Public release assets'
-foreach ($name in $expectedChecksumNames) {
+foreach ($name in $checksumByName.Keys) {
     $assets = @($release.assets | Where-Object { $_.name -ceq $name })
     if ($assets.Count -ne 1) {
         throw "Public release must contain exactly one $name asset."

@@ -81,6 +81,11 @@ that it cannot rederive. CI repeats release identity, schema, clean-install,
 uninstall, and bad-hash validation on both supported architectures. The Scoop
 core used in CI is pinned to an immutable revision.
 
+Release inventory is derived from `SHA256SUMS` and matched exactly to GitHub's
+digested release assets. Native archives, `git-slop.rb`, and
+`release-manifest.json` remain required, while additional checksummed metadata
+such as SBOMs can be added without duplicating their filenames in this bucket.
+
 After publishing a new manifest, dispatch `CI` on exact current `main` with
 `previous_manifest_ref` set to the full ancestor commit that contains the
 previous public manifest. That bounded lane installs the previous version,
