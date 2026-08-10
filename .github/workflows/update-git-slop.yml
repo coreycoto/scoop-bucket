@@ -147,23 +147,24 @@ jobs:
               )] | length) == 1
             ' "$release_dir/release-manifest.json" >/dev/null
 
+          checksum_assets="$RUNNER_TEMP/checksum-assets.txt"
           expected_assets="$RUNNER_TEMP/expected-assets.txt"
           actual_assets="$RUNNER_TEMP/actual-assets.txt"
+          awk '{ print $2 }' "$release_dir/SHA256SUMS" | LC_ALL=C sort > "$checksum_assets"
+          test "$(wc -l < "$checksum_assets")" = "$(sort -u "$checksum_assets" | wc -l)"
           {
-            jq -r '.artifacts[].name' "$release_dir/release-manifest.json"
-            printf '%s\n' SHA256SUMS git-slop.rb release-manifest.json
+            cat "$checksum_assets"
+            printf '%s\n' SHA256SUMS
           } | LC_ALL=C sort > "$expected_assets"
           jq -r '.assets[].name' "$release_json" | LC_ALL=C sort > "$actual_assets"
           diff -u "$expected_assets" "$actual_assets"
 
-          expected_checksums="$RUNNER_TEMP/expected-checksums.txt"
-          actual_checksums="$RUNNER_TEMP/actual-checksums.txt"
+          required_checksums="$RUNNER_TEMP/required-checksums.txt"
           {
             jq -r '.artifacts[].name' "$release_dir/release-manifest.json"
             printf '%s\n' git-slop.rb release-manifest.json
-          } | LC_ALL=C sort > "$expected_checksums"
-          awk '{ print $2 }' "$release_dir/SHA256SUMS" | LC_ALL=C sort > "$actual_checksums"
-          diff -u "$expected_checksums" "$actual_checksums"
+          } | LC_ALL=C sort > "$required_checksums"
+          test -z "$(comm -23 "$required_checksums" "$checksum_assets")"
 
           jq -e \
             --arg digest "sha256:${manifest_sha256}" '

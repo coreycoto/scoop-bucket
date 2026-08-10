@@ -80,11 +80,10 @@ $targetByArchitecture = [ordered]@{
     '64bit' = 'x86_64-pc-windows-msvc'
     'arm64' = 'aarch64-pc-windows-msvc'
 }
-$expectedNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
-$actualNames = @($checksumByName.Keys | Sort-Object)
-$nameDifference = @(Compare-Object -ReferenceObject @($expectedNames | Sort-Object) -DifferenceObject $actualNames)
-if ($nameDifference.Count -ne 0 -or $actualNames.Count -ne $expectedNames.Count) {
-    throw 'SHA256SUMS does not match the manifest-derived Git Slop release contract.'
+$requiredNames = @($artifactNames + @('release-manifest.json', 'git-slop.rb'))
+$missingNames = @($requiredNames | Where-Object { -not $checksumByName.ContainsKey($_) })
+if ($missingNames.Count -ne 0) {
+    throw "SHA256SUMS is missing required Git Slop release assets: $($missingNames -join ', ')."
 }
 $releaseManifestDigest = (Get-FileHash -LiteralPath $temporaryReleaseManifest -Algorithm SHA256).Hash.ToLowerInvariant()
 if ([string] $checksumByName['release-manifest.json'] -cne $releaseManifestDigest) {
