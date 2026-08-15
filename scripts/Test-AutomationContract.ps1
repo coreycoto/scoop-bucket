@@ -96,6 +96,15 @@ foreach ($required in @(
     '.parents[0].sha == $base and',
     '.parents[1].sha == $head and',
     'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main',
+    'Delete consumed exact automation branch',
+    'test "$BRANCH" = "$expected_branch"',
+    'refs/remotes/origin/cleanup-main',
+    'refs/remotes/origin/cleanup-branch',
+    '"${live_main}:bucket/git-slop.json"',
+    '"${remote_sha}:bucket/git-slop.json"',
+    '"repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}"',
+    'test -z "$(git ls-remote origin "refs/heads/${BRANCH}"',
+    'Automation branch cleaned:',
     'Exact-main qualification:'
 )) {
     Require-Text -Text $receiver -Expected $required -Label 'update-git-slop.yml'
@@ -171,7 +180,8 @@ foreach ($required in @(
     'manifest-only pull request',
     'Windows 64bit',
     'Windows arm64',
-    'no per-release approval or merge'
+    'no per-release approval or merge',
+    'deletes only the consumed exact-version automation branch'
 )) {
     Require-Text -Text $readme -Expected $required -Label 'README.md'
 }
