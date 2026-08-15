@@ -619,11 +619,61 @@ jobs:
           echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
           echo "run-url=$(jq -r .html_url "$RUNNER_TEMP/main-run.json")" >> "$GITHUB_OUTPUT"
 
+      - name: Delete consumed exact automation branch
+        id: cleanup
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          CHANGED: ${{ steps.branch.outputs.changed }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_HEAD: ${{ steps.branch.outputs.head-sha }}
+          PUBLISHED: ${{ steps.branch.outputs.published }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          expected_branch="automation/git-slop-v${RELEASE_VERSION}"
+          test "$BRANCH" = "$expected_branch"
+          [[ "$BRANCH" =~ ^automation/git-slop-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+          remote_sha="$(git ls-remote origin "refs/heads/${BRANCH}" | awk 'NR == 1 { print $1 }')"
+          if test -z "$remote_sha"; then
+            {
+              echo "cleaned=true"
+              echo "state=already-absent"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$remote_sha" =~ ^[0-9a-f]{40}$ ]]
+          if test "$CHANGED" = "true"; then
+            test "$remote_sha" = "$MANIFEST_HEAD"
+          else
+            test "$PUBLISHED" = "true"
+          fi
+
+          live_main="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          test -n "$live_main"
+          git fetch --no-tags --force origin \
+            "refs/heads/main:refs/remotes/origin/cleanup-main" \
+            "refs/heads/${BRANCH}:refs/remotes/origin/cleanup-branch"
+          test "$(git rev-parse refs/remotes/origin/cleanup-main)" = "$live_main"
+          test "$(git rev-parse refs/remotes/origin/cleanup-branch)" = "$remote_sha"
+          cmp \
+            <(git show "${live_main}:bucket/git-slop.json") \
+            <(git show "${remote_sha}:bucket/git-slop.json")
+
+          gh api --method DELETE \
+            "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}"
+          test -z "$(git ls-remote origin "refs/heads/${BRANCH}" | awk 'NR == 1 { print $1 }')"
+          {
+            echo "cleaned=true"
+            echo "state=deleted"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Summarize trusted Scoop publication
         if: always()
         env:
           AUTOMATION_BRANCH: ${{ steps.branch.outputs.branch }}
           CHANGED: ${{ steps.branch.outputs.changed }}
+          CLEANUP_STATE: ${{ steps.cleanup.outputs.state }}
+          BRANCH_CLEANED: ${{ steps.cleanup.outputs.cleaned }}
           MANIFEST_HEAD: ${{ steps.branch.outputs.head-sha }}
           MERGE_SHA: ${{ steps.merge.outputs.merge-sha }}
           PULL_REQUEST: ${{ steps.pull-request.outputs.number }}
@@ -639,6 +689,7 @@ jobs:
             echo "- Release revision: \`${RELEASE_REVISION}\`"
             echo "- Manifest changed: \`${CHANGED}\`"
             echo "- Automation branch: \`${AUTOMATION_BRANCH}\`"
+            echo "- Automation branch cleaned: \`${BRANCH_CLEANED:-false}\` (${CLEANUP_STATE:-not-run})"
             echo "- Manifest head: \`${MANIFEST_HEAD}\`"
             if test -n "$PULL_REQUEST"; then
               echo "- Pull request: #${PULL_REQUEST}"

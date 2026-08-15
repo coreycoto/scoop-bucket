@@ -62,6 +62,11 @@ required `Windows 64bit` and `Windows arm64` jobs, rechecks the current base, PR
 author, single-file allowlist, run identity, and job results, then merges through
 the active `main` ruleset. It explicitly dispatches the same native qualification
 on the resulting merge commit.
+Only after exact-main qualification passes, it verifies that the automation
+head and published `main` contain the same manifest, then
+deletes only the consumed exact-version automation branch and proves that remote
+ref is absent. An idempotent rerun also cleans an already-consumed branch left by
+an interrupted older run.
 There is no per-release approval or merge for the repository owner.
 
 ## Maintaining The Manifest
@@ -99,4 +104,4 @@ Repository layout:
 - `tests/fixtures/`: immutable non-published regression manifests; and
 - `.github/workflows/ci.yml`: read-only native Windows qualification; and
 - `.github/workflows/update-git-slop.yml`: trusted release receiver, exact-head
-  qualification, governed merge, and exact-main proof.
+  qualification, governed merge, exact-main proof, and bounded branch cleanup.
